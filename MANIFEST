@@ -1,5 +1,6 @@
 bin/stackrad
 Changes
+err
 inc/Module/Install.pm
 inc/Module/Install/Base.pm
 inc/Module/Install/Can.pm
@@ -22,4 +23,3 @@ README
 t/use_ok.t
 test-stackrad
 TODO
-wikrad.pm

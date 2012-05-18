@@ -9,20 +9,22 @@ package Stackato::Stackrad;
 use Mo qw'build builder default';
 use Curses::UI 0;
 use LWP::UserAgent 0;
+use LWP::Protocol::https 0;
 use HTTP::Request 0;
+use URI::Escape 0;
 use JSON::XS 0;
 use YAML::XS 0;
 # use XXX;
 our $VERSION;
 BEGIN {
-    $VERSION = '0.01';
+    $VERSION = '0.02';
 }
 
 our $SELF;
 sub PPP {
     my $self = $SELF;
     my $text = YAML::XS::Dump(@_);
-    $self->cui->error($text);
+    $self->error($text);
     wantarray ? @_ : $_[0]
 }
 
@@ -31,13 +33,30 @@ use constant target_key_hint => ' (set target with Ctrl+t)';
 use constant default_title => app_name . target_key_hint;
 use constant new_target_prompt =>
     "New target? (e.g., api.stackato.example.com)";
+use constant username_prompt => "Username:";
+use constant password_prompt => "Password:";
 use constant user_agent_string =>
     app_name . "/$VERSION lwp/$LWP::UserAgent::VERSION";
 use constant main_color => 'cyan';
 use constant secondary_color => 'cyan';
 use constant accent_color => 'red';
+use constant banner => <<EOT;
+        _____                   _              _          _
+       / ____|                 | |            | |        | |
+  ____| O_________          ___| |_  __ _  ___| | __ __ _| |_  ___
+ /     \\___ \\     \\        / __| __|/ _` |/ __| |/ // _` | __|/ _ \\ TM
+|     .____O |     |       \\__ \\ |_| (_| | (__|   <| (_| | |_| (_) |
+ \\_...|_____...___/        |___/\\__|\\__,_|\\___|_|\\_\\\\__,_|\\__|\\___/
+                                                by ActiveState
+                                                
+
+
+
+
+EOT
 
 has targets => (default => sub{[]});
+# has targets => (default => sub{[{hostname=>'api.stacka.to'}]});
 
 has target_index => ();
 has cui => ();
@@ -46,10 +65,12 @@ has tabs => ();
 has ui => (default => sub { [ 
     {
         name => 'Targets',
+        on_activate => sub { },
         contents => undef,
     },
     {
         name => 'Overview',
+        on_activate => sub { },
         contents => <<'EOT'
 Memory: [ 128 MB of 256 MB ]
 [----------------                  ]
@@ -75,14 +96,14 @@ EOT
     },
     {
         name => 'Users',
+        on_activate => sub { $SELF->update_users },
         contents => <<'EOT'
-[ ] ingy@activestate.com
-[ ] ingy@ingy.net
-[ ] as@sharpsaw.org
+You need to login to a valid target Stackato VM.
 EOT
     },
     {
         name => 'Groups',
+        on_activate => sub { },
         contents => <<'EOT'
     Group   Users   Apps
 [ ] pair    5       1
@@ -90,6 +111,7 @@ EOT
     },
     {
         name => 'App Store',
+        on_activate => sub { },
         contents => <<'EOT'
 [ ] Bugzilla - perl / mysql
     A bug tracking system for individuals or groups of developers
@@ -110,6 +132,17 @@ EOT
 [ ] ...
 EOT
     },
+    {
+        name => 'Local Apps',
+        on_activate => sub { },
+        contents => <<'EOT'
+[ ] Node Env - node
+    /home/ingy/src/node-env/
+
+[ ] Foozle - ruby / postgresql
+    /home/ingy/src/foozle/
+EOT
+    },
 ]});
 
 
@@ -123,6 +156,7 @@ sub run {
 
 sub setup_cui {
     my $self = shift;
+    $self->target_index($#{$self->targets}) if @{$self->targets};    # XXX
     my $cui = $self->{cui} = $self->cui(
         Curses::UI->new(
             -color_support => 1,
@@ -133,7 +167,10 @@ sub setup_cui {
     $cui->set_binding(sub { exit 0 }, "\cC");
     $cui->set_binding(sub { $self->prompt_for_target }, "\cT");
     $cui->set_binding(sub { $self->delete_current_target }, "\cX");
-    $cui->set_binding(sub { PPP @_ }, "\c1");
+    $cui->set_binding(sub { $self->login_logout }, "\cL");
+    for my $index (1 .. 9) {
+        $cui->set_binding(sub { $self->set_target($index) }, $index);
+    }
 
     my $win1 = $self->{win1} =
         $cui->add('win1', 'Window',
@@ -155,7 +192,9 @@ sub setup_cui {
     for my $tab (@{$self->ui}) {
         my $name = $tab->{name};
         my $id = 'tab_'.$name;
-        my $page = $tab->{page} = $notebook->add_page($name);
+        my $page = $tab->{page} = $notebook->add_page($name,
+            -on_activate => $tab->{on_activate}
+        );
         $tab->{tv} = $page->add(
             $id, 'TextViewer',
             -x    => 1,
@@ -180,11 +219,20 @@ sub current_target {
     $self->targets->[$self->target_index]
 }
 
+sub set_target {
+    my ($self, $new_index) = @_;
+    $self->target_index($new_index);
+    $self->update_users;
+}
+
 sub prompt_for_target {
     my $self = shift;
-    my $answer = $self->cui->question(new_target_prompt);
+    my $answer = $self->cui->question(new_target_prompt); # TODO: "api."
     return unless $answer;
-    push @{$self->targets}, $answer;
+
+    return $self->error($answer . " does not appear to be a valid Stackato VM")
+        unless $self->validate_target($answer);
+    push @{$self->targets}, {hostname => $answer};
     $self->target_index($#{$self->targets});
     $self->update_targets_screen;
     $self->set_title
@@ -203,56 +251,188 @@ sub delete_current_target {
 
 sub update_targets_screen {
     my $self = shift;
-
     my $tab = $self->tab_named('Targets');
     my $out = '';
     for (0 .. $#{$self->targets}) {
+        my $target = $self->targets->[$_];
         $out .= $_ == $self->target_index ? ' * ' : '   ';
-        $out .= $self->targets->[$_] . "\n";
+        $out .= $target->{hostname};
+        $out .= $target->{user}
+            ? " (${\$target->{user}}) "
+            : " (not logged in) ";
+        $out .= "\n";
     }
-    $out .= "\nPress 'Ctrl+t' to add a target.";
-    $out .= "\n\nPress 'Ctrl+x' to delete current target."
-        if @{$self->targets};
-    $out .= "\n\nPress 'Ctrl+<target #>' to set current target."
-        if @{$self->targets};
+    $out .= "\n\n";
+    if (@{$self->targets}) {
+        $out .= 'Ctrl+L to log' . ($self->logged_in ? 'out' : 'in')."\n";
+        $out .= "Ctrl+x to delete current target.\n"
+    } else {
+        $out .= banner;
+    }
+    $out .= "Ctrl+t to add a target.\n";
+#     $out .= "\n\nPress 'Ctrl+<target #>' to set current target."
+#         if @{$self->targets} > 1;
     $tab->{tv}{-text} = $out;
-    $self->win1->draw(1);
+    $self->redraw;
+}
+
+sub update_users {
+    my $self = shift;
+    my $out = '';
+    if (not $self->current_target) {
+        $out = 'You have no Stackato VM as a current target.';
+    }
+    else {
+        my $response = $self->get(path => '/users');
+        my $status = $response->code;
+        if ($status == 403) {
+            $out = "Unauthorized. Maybe you need to login as an admin user?";
+        } else {
+            my $data = decode_json($response->content);
+            for (0 .. $#{$data}) {
+                my $user = $data->[$_];
+                $out .= $_+1 . '. ' . $user->{email} . "\n";
+            }
+        }
+    }
+    $self->tab_named('Users')->{tv}{-text} = $out;
+}
+
+sub login_logout {
+    my $self = shift;
+    return $self->logout if $self->logged_in;
+    my $username = $self->cui->question(username_prompt); # TODO: <prev-user>
+    return unless $username;
+    my $password = $self->cui->question(password_prompt);
+    return unless $password;
+    my $path = '/users/' . uri_escape($username) . '/tokens';
+    $password = quotemeta($password);
+    my $response = $self->post(
+        path => $path,
+        content => qq({"password":"$password"})
+    );
+    unless ($response->is_success) {
+        $self->error("Couldn't login.");
+        return $self->logout;
+    }
+    my $token = decode_json($response->content)->{token};
+    $self->current_target->{user} = $username;
+    $self->current_target->{token} = $token;
+    $self->update_targets_screen;
+}
+
+sub logout {
+    my $self = shift;
+    my $cur = $self->current_target;
+    delete $cur->{user};
+    delete $cur->{token};
+    $self->update_targets_screen;
+}
+
+sub logged_in {
+    my $self = shift;
+    $self->current_target->{user}
 }
 
 sub set_title {
     my $self = shift;
-    $self->win1->{-title} = app_name . ' - target: ' . $self->current_target;
-    $self->win1->draw(1);
+    my $title = app_name;
+    $title .= ' - target: ' . (
+        $self->current_target &&
+        $self->current_target->{hostname} ||
+        'No Target'
+    );
+    $self->win1->{-title} = $title;
+    $self->redraw;
 }
 
-sub do_info {
-    my $self = shift;
-    my $text = $self->request_info;
-    $self->win1->add("text", "TextViewer", -text => $text);
+sub validate_target {
+    my ($self, $target) = @_;
+    my $response = $self->get_from_target(
+        target => { hostname => $target },
+        path => '/info/'
+    );
+    return unless $response->is_success; 
+    decode_json($response->content)
 }
 
-sub request_info {
-    my $self = shift;
-    my $response = $self->get('/info/');
-    return "Request error: " . YAML::XS::Dump($response)
-        unless $response->is_success; 
-    YAML::XS::Dump(decode_json($response->content))
+sub post_to_target {
+    my ($self, %args) = @_;
+    $self->ua->simple_request(
+        $self->http_req('POST',
+            host => $args{target}{hostname},
+            path => $args{path},
+            headers => {
+                $args{target}{token}
+                ? ('AUTHORIZATION' => $args{target}{token}) : ()
+            },
+            content => $args{content},
+        )
+    )
+}
+
+sub post {
+    my ($self, %args) = @_;
+    $self->post_to_target(
+        target => $self->current_target,
+        path => $args{path},
+        content => $args{content},
+    )
+}
+
+sub get_from_target {
+    my ($self, %args) = @_;
+    $self->ua->simple_request(
+        $self->http_req('GET',
+            host => $args{target}{hostname},
+            path => $args{path},
+            headers => {
+                $args{target}{token}
+                ? ('AUTHORIZATION' => $args{target}{token}) : ()
+            },
+            content => $args{content},
+        )
+    )
 }
 
 sub get {
-    my ($self, $path) = @_;
+    my ($self, %args) = @_;
+    $self->get_from_target(
+        target => $self->current_target,
+        path => $args{path},
+        content => $args{content},
+    )
+}
+
+sub ua {
+    my $self = shift;
     my $ua = LWP::UserAgent->new(agent => user_agent_string);
-    warn "Stackrad being lazy and disabling SSL cert verification!";
+    # XXX
+    # warn "Stackrad being lazy and disabling SSL cert verification!";
     $ua->ssl_opts(
         verify_hostname => 0,
         #? SSL_ca_path => '/app/fs/pair/certcert/stackato.ddns.us.pem',
     );
-    my $server = $self->current_target;
-    my $request = HTTP::Request->new('GET', 'https://'.$server.$path);
-    $request->header('Accept' => 'application/json');
-    #? cookies?
-    #? $request->header( 'Content-Type' => $p{type} )     if $p{type};
-    $ua->simple_request($request)
+    $ua
+}
+
+sub http_req {
+    my ($self, $method, %args) = @_;
+    my $url = "https://$args{host}$args{path}";
+    my $request = HTTP::Request->new($method, $url);
+    $request->header('Accept' => 'application/json', %{$args{headers}});
+    $request->content($args{content}) if $args{content};
+    $request
+}
+
+sub error {
+    my $self = shift;
+    $self->cui->error(@_);
+}
+
+sub redraw {
+    my $self = shift;
+    $self->win1->draw(1);
 }
 
 1;
