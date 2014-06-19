@@ -1,10 +1,9 @@
----
-version: 0.02
-date:    Fri May 18 21:25:45 UTC 2012
-changes:
-- second release
----
-version: 0.01
-date:    Fri May 18 17:55:32 UTC 2012
-changes:
-- first release
+0.03 Thu Jun 19 11:08:40 PDT 2014
+ - Add dependencies, so tests pass on cpantesters
+
+0.02 Fri May 18 21:25:45 UTC 2012
+ - second release
+
+0.01 Fri May 18 17:55:32 UTC 2012
+ - first release
+
