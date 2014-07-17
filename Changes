@@ -1,3 +1,6 @@
+0.04 Wed Jul 16 23:27:31 PDT 2014
+ - Fix Meta and add Contributing file
+
 0.03 Thu Jun 19 11:08:40 PDT 2014
  - Add dependencies, so tests pass on cpantesters
 
