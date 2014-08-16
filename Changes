@@ -1,3 +1,6 @@
+0.10 Sat Aug 16 04:06:00 PDT 2014
+ - Eliminate spurious trailing whitespace
+
 0.09 Fri Aug 15 21:28:30 PDT 2014
  - Remove t/use_ok.t
 
