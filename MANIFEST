@@ -10,6 +10,5 @@ README
 bin/stackrad
 lib/Stackato/Stackrad.pm
 lib/Stackato/Stackrad.pod
-t/000-compile-modules.t
 t/release-pod-syntax.t
 xt/test-stackrad
